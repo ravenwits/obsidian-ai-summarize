@@ -2,6 +2,7 @@
 
 Welcome to the Obsidian AI Summary Plugin! This plugin provides an easy-to-use AI summary tool for your notes in Obsidian. With this plugin, you can quickly summarize selected text within a note, replacing the selection with the generated summary. Additionally, there are options to customize the prompt and maximum tokens for summarization. You can also choose to paste the summary under the `summary` property of the frontmatter of the note.
 
+
 ## Features
 
 - **AI Summarization**: Summarize selected text within a note using AI technology.
@@ -9,6 +10,13 @@ Welcome to the Obsidian AI Summary Plugin! This plugin provides an easy-to-use A
 - **Customizable Prompt**: Optionally customize the prompt used for AI summarization.
 - **Customizable Max Tokens**: Optionally customize the maximum tokens used for summarization.
 - **Toggle Option**: Choose whether to replace the selection or paste the summary under the `summary` property of the note's frontmatter.
+
+
+Inline Summerization from menu:
+![](https://github.com/RavenWits/obsidian-ai-summerize/blob/main/gifs/Inline_Summerize.gif)
+
+Frontmatter Summerization from command palette:
+![](https://github.com/RavenWits/obsidian-ai-summerize/blob/main/gifs/Frontmatter_Summarize.gif)
 
 ## Installation
 
@@ -45,7 +53,7 @@ This project is licensed under the [GPL-3.0 License](LICENSE).
 ## Donate
 
 If you find this plugin helpful and would like to support its development, consider buying me a coffee! ☕️
-[Donate](https://www.buymeacoffee.com/ravenwits)
+[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="BuyMeACoffee" width="100">](https://www.buymeacoffee.com/ravenwits)
 
 ---
 
