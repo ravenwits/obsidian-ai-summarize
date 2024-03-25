@@ -73,8 +73,6 @@ export default class AISummarizePlugin extends Plugin {
 	}
 
 	async generateSummary(selectedText: string, editor: EnhancedEditor): Promise<string> {
-		const { vault } = this.app;
-
 		try {
 			const activeFile = this.app.workspace.getActiveFile();
 
@@ -130,7 +128,7 @@ export default class AISummarizePlugin extends Plugin {
 			id: 'ai-summarize-summarize-selection',
 			name: 'Summarize Selection',
 			icon: 'lucide-bot',
-			editorCallback(editor, ctx) {
+			editorCallback: (editor, ctx) => {
 				const selected = editor.getSelection();
 				const wordCount = selected.split(' ').length;
 
