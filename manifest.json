@@ -1,10 +1,10 @@
 {
-	"id": "AI-Summarize",
+	"id": "ai-summarize",
 	"name": "AI Summarize",
 	"version": "1.0.1",
 	"minAppVersion": "0.15.0",
 	"description": "Summarize your notes using AI",
-	"author": "ravenwits",
+	"author": "ALP SARIYER",
 	"authorUrl": "https://www.alpsariyer.dev",
 	"fundingUrl": {
 		"Github Sponsor": "https://github.com/sponsors/ravenwits",
