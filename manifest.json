@@ -1,0 +1,15 @@
+{
+	"id": "AI-Summarize",
+	"name": "AI Summarize",
+	"version": "1.0.1",
+	"minAppVersion": "0.15.0",
+	"description": "Summarize your notes using AI",
+	"author": "ravenwits",
+	"authorUrl": "https://www.alpsariyer.dev",
+	"fundingUrl": {
+		"Github Sponsor": "https://github.com/sponsors/ravenwits",
+		"Buy me a Coffee": "https://buymeacoffee.com/ravenwits"
+	},
+	"donation": "https://buymeacoffee.com/ravenwits",
+	"isDesktopOnly": false
+}
