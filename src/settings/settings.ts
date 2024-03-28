@@ -28,12 +28,12 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'General Settings - AI Summarize' });
+		new Setting(containerEl).setName('General Settings').setHeading();
 
 		new Setting(containerEl)
-			.setName('API Key')
-			.setTooltip('Get your OpenAI API Key from https://platform.openai.com/account/api-keys')
-			.setDesc('OpenAI API Key is required to use the AI Summarize plugin.')
+			.setName('API key')
+			.setTooltip('Get your OpenAI API key from https://platform.openai.com/account/api-keys')
+			.setDesc('OpenAI API key is required to use the AI Summarize plugin.')
 			.addText((text) =>
 				text
 					.setPlaceholder('Your API Key')
@@ -45,7 +45,7 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Max Tokens')
+			.setName('Max tokens')
 			.setDesc('Max tokens to generate the summary. Default is 1000.')
 			.addText((text) =>
 				text
@@ -58,8 +58,8 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Default Prompt')
-			.setDesc('Default Prompt for the AI to generate a summary.')
+			.setName('Default prompt')
+			.setDesc('Default prompt for the AI to generate a summary.')
 			.addTextArea((text) =>
 				text
 					.setPlaceholder('Your custom prompt')
@@ -71,7 +71,7 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName('Summary in the Frontmatter')
+			.setName('Summary in the frontmatter')
 			.setDesc('This will put the generated summary in the frontmatter of the note otherwise the selected text will be replaced by the summary.')
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.putSummaryInFrontmatter).onChange(async (value) => {
@@ -80,12 +80,12 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		containerEl.createEl('h5', { text: 'KNOW HOW:' });
+		new Setting(containerEl).setName('KNOW HOW').setHeading();
 		containerEl.createEl('p', {
 			text: 'To generate a summary, select at least 10 words within a note. You can use the context menu by right-clicking on a selection and choosing "AI Summarize", or you can use the command palette and search for "AI Summarize".',
 		});
 
-		containerEl.createEl('h5', { text: 'SUPPORT:' });
+		new Setting(containerEl).setName('SUPPORT').setHeading();
 		const donateText = document.createElement('p');
 		donateText.textContent = 'If you find this plugin valuable and would like to support its continued development, please consider buying me a coffee:';
 		containerEl.appendChild(donateText);

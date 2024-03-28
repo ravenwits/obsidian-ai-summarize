@@ -1,4 +1,4 @@
-import { App, Editor, Menu, Plugin, MarkdownView, TFile } from 'obsidian';
+import { App, Editor, Menu, Plugin } from 'obsidian';
 import Notify from './Notify';
 import { prompt } from './gpt';
 import AiSummarizeSettingTab, { AiSummarizePluginSettings, default_settings } from 'src/settings/settings';
@@ -16,61 +16,6 @@ export type EnhancedEditor = Editor & {
 export default class AISummarizePlugin extends Plugin {
 	settings: AiSummarizePluginSettings;
 	frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
-
-	updateSummary(md: string, newSummary: string): Record<string, string> {
-		const frontmatterMatch = md.match(this.frontmatterRegex);
-		const frontmatter: Record<string, string | string[]> = {};
-
-		if (frontmatterMatch) {
-			const frontmatterString = frontmatterMatch[1];
-			let currentKey = '';
-			frontmatterString.split('\n').forEach((line) => {
-				if (line.startsWith('-')) {
-					// This line is part of a list
-					if (!frontmatter[currentKey]) {
-						frontmatter[currentKey] = [];
-					}
-					frontmatter[currentKey] = line.trim().replace('-', '');
-				} else {
-					const [key, value] = line.split(':').map((item) => item.trim());
-					currentKey = key.toLowerCase();
-					frontmatter[currentKey] = value;
-				}
-			});
-		}
-		const updatedFrontmatter = { ...frontmatter, summary: newSummary };
-		return updatedFrontmatter;
-	}
-
-	async updateFrontmatter(content: string, frontmatter: any, activeFile: TFile): Promise<void> {
-		function serializeToYaml(properties: any): string {
-			// Start with the opening delimiter
-			let yamlString = '---\n';
-
-			// Iterate over each property in the object
-			for (const [key, value] of Object.entries(properties)) {
-				// Handle the tags array separately
-				if (Array.isArray(value)) {
-					value.forEach((v: string) => {
-						yamlString += `${key}: "${v}"\n`;
-					});
-				} else {
-					// For other properties, add them to the YAML string
-					yamlString += value != undefined ? `${key}: ${value}\n` : `${key}\n`;
-				}
-			}
-
-			yamlString += `---\n`;
-
-			return yamlString;
-		}
-
-		const serializedFrontMatter = serializeToYaml(frontmatter);
-		const updatedContent = serializedFrontMatter + content.replace(this.frontmatterRegex, '');
-
-		await this.app.vault.modify(activeFile, updatedContent);
-		Notify('Summary updated successfully.');
-	}
 
 	async generateSummary(selectedText: string, editor: EnhancedEditor): Promise<string> {
 		try {
@@ -93,9 +38,9 @@ export default class AISummarizePlugin extends Plugin {
 						summary += summaryChunk;
 					}
 					if (this.settings.putSummaryInFrontmatter) {
-						const content = await this.app.vault.read(activeFile);
-						const frontmatter = this.updateSummary(content, `"${summary}"`);
-						this.updateFrontmatter(content, frontmatter, activeFile);
+						this.app.fileManager.processFrontMatter(activeFile, (fm) => {
+							fm['summary'] = summary;
+						});
 					} else {
 						message = 'Selection summarized successfully.';
 					}
@@ -125,8 +70,8 @@ export default class AISummarizePlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on('editor-menu', this.handleHighlighterInContextMenu));
 
 		this.addCommand({
-			id: 'ai-summarize-summarize-selection',
-			name: 'Summarize Selection',
+			id: 'summarize-selection',
+			name: 'Summarize selection',
 			icon: 'lucide-bot',
 			editorCallback: (editor, ctx) => {
 				const selected = editor.getSelection();
@@ -158,7 +103,7 @@ export default class AISummarizePlugin extends Plugin {
 			menu.addSeparator();
 			menu.addItem((item) => {
 				item
-					.setTitle('AI Summarize')
+					.setTitle('AI summarize')
 					.setIcon('lucide-bot')
 					.onClick((e) => {
 						if (editor.getSelection()) {

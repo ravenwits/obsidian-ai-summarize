@@ -40,7 +40,7 @@ export async function* prompt(prompt: string, apiKey: string, maxTokens: number)
 				const token = parsed.choices[0].delta.content;
 				if (token) {
 					content += token;
-					yield token; // Yield each chunk of data as it is available
+					yield token;
 				}
 			} catch (error) {
 				console.error(`Could not JSON parse stream message`, {

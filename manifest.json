@@ -2,14 +2,13 @@
 	"id": "ai-summarize",
 	"name": "AI Summarize",
 	"version": "1.0.1",
-	"minAppVersion": "0.15.0",
+	"minAppVersion": "1.5.11",
 	"description": "Summarize your notes using AI",
-	"author": "ALP SARIYER",
+	"author": "Alp Sariyer",
 	"authorUrl": "https://www.alpsariyer.dev",
 	"fundingUrl": {
 		"Github Sponsor": "https://github.com/sponsors/ravenwits",
 		"Buy me a Coffee": "https://buymeacoffee.com/ravenwits"
 	},
-	"donation": "https://buymeacoffee.com/ravenwits",
 	"isDesktopOnly": false
 }
