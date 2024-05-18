@@ -29,11 +29,11 @@ export default class AISummarizePlugin extends Plugin {
 			const promptText = `${this.settings.defaultPrompt} ${title ? 'title of the note is: ' + title + '\n' : ''} \n\n${selectedText}`;
 
 			if (!!this.settings.apiKey) {
-				Notify('Generating summary...');
+				Notify(`Generating summary...`);
 				let message = 'Summary updated successfully.';
 				(async () => {
 					let summary = '';
-					for await (const summaryChunk of prompt(promptText, this.settings.apiKey, this.settings.maxTokens)) {
+					for await (const summaryChunk of prompt(promptText, this.settings.apiKey, this.settings.maxTokens, this.settings.model)) {
 						if (!this.settings.putSummaryInFrontmatter) editor.replaceSelection(summaryChunk);
 						summary += summaryChunk;
 					}

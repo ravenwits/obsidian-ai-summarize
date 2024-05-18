@@ -6,6 +6,7 @@ export interface AiSummarizePluginSettings {
 	maxTokens: number;
 	defaultPrompt: string;
 	putSummaryInFrontmatter: boolean;
+	model?: string;
 }
 
 const defaultMaxTokens = 1000;
@@ -14,6 +15,7 @@ export const default_settings: AiSummarizePluginSettings = {
 	maxTokens: defaultMaxTokens,
 	defaultPrompt: 'Generate a very short summary of the following note in 3-4 sentences:\n\n',
 	putSummaryInFrontmatter: false,
+	model: 'gpt-3.5-turbo',
 };
 
 export default class AiSummarizeSettingTab extends PluginSettingTab {
@@ -53,6 +55,19 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.maxTokens?.toString() || defaultMaxTokens.toString())
 					.onChange(async (value) => {
 						this.plugin.settings.maxTokens = Number.parseInt(value);
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('AI Model')
+			.setDesc('The AI model to use for generating the summary. Default is gpt-3.5-turbo.')
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOptions({ 'gpt-3.5-turbo': 'gpt-3.5-turbo', 'gpt-4': 'gpt-4', 'gpt-4-turbo': 'gpt-4-turbo', 'gpt-4o': 'gpt-4o' })
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model = value;
 						await this.plugin.saveSettings();
 					}),
 			);

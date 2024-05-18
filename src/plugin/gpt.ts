@@ -1,6 +1,6 @@
 const url = 'https://api.openai.com/v1/chat/completions';
 
-export async function* prompt(prompt: string, apiKey: string, maxTokens: number) {
+export async function* prompt(prompt: string, apiKey: string, maxTokens: number, model: string = 'gpt-3.5-turbo') {
 	const requestOptions = {
 		method: 'POST',
 		headers: {
@@ -9,7 +9,7 @@ export async function* prompt(prompt: string, apiKey: string, maxTokens: number)
 		},
 		body: JSON.stringify({
 			messages: [{ role: 'system', content: prompt }],
-			model: 'gpt-3.5-turbo',
+			model: model,
 			temperature: 0.7,
 			max_tokens: maxTokens,
 			top_p: 1,
