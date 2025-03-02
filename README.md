@@ -12,10 +12,10 @@ Welcome to the Obsidian AI Summary Plugin! This plugin provides an easy-to-use A
 - **Toggle Option**: Choose whether to replace the selection or paste the summary under the `summary` property of the note's frontmatter.
 
 
-Inline Summerization from menu:
+Inline Summarization from menu:
 ![](https://github.com/RavenWits/obsidian-ai-summerize/blob/main/gifs/Inline_Summerize.gif)
 
-Frontmatter Summerization from command palette:
+Frontmatter Summarization from command palette:
 ![](https://github.com/RavenWits/obsidian-ai-summerize/blob/main/gifs/Frontmatter_Summarize.gif)
 
 ## Installation
