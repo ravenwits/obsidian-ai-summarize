@@ -1,22 +1,132 @@
-import { App, Setting, PluginSettingTab } from 'obsidian';
-import AISummarizePlugin from 'src/plugin/main';
+import { App, Setting, PluginSettingTab } from "obsidian";
+import AISummarizePlugin from "src/plugin/main";
+
+export interface ModelProfile {
+	id: string;
+	name: string;
+	model: string;
+	maxTokens: number;
+	defaultPrompt: string;
+	systemInstruction?: string;
+	summaryPlacement?: "frontmatter" | "replace" | "below";
+}
 
 export interface AiSummarizePluginSettings {
 	apiKey: string;
 	maxTokens: number;
 	defaultPrompt: string;
-	putSummaryInFrontmatter: boolean;
 	model?: string;
+	availableModels?: string[];
+	systemInstruction?: string;
+	summaryPlacement?: "frontmatter" | "replace" | "below";
+	profiles?: ModelProfile[];
+	activeProfileId?: string;
 }
 
 const defaultMaxTokens = 1000;
 export const default_settings: AiSummarizePluginSettings = {
-	apiKey: '',
+	apiKey: "",
 	maxTokens: defaultMaxTokens,
-	defaultPrompt: 'Generate a very short summary of the following note in 3-4 sentences:\n\n',
-	putSummaryInFrontmatter: false,
-	model: 'gpt-3.5-turbo',
+	defaultPrompt:
+		"Generate a very short summary of the following note in 3-4 sentences:\n\n",
+	model: "gpt-3.5-turbo",
+	availableModels: ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o"], // fallback models
+	systemInstruction: "",
+	summaryPlacement: "replace",
+	profiles: [
+		{
+			id: "default",
+			name: "Default",
+			model: "gpt-3.5-turbo",
+			maxTokens: defaultMaxTokens,
+			defaultPrompt:
+				"Generate a very short summary of the following note in 3-4 sentences:\n\n",
+			systemInstruction: "",
+			summaryPlacement: "replace",
+		},
+	],
+	activeProfileId: "default",
 };
+
+// Model capability tags for user-friendly labels in the dropdown
+const MODEL_CAPABILITIES: Record<string, string[]> = {
+	"gpt-3.5-turbo": ["Legacy"],
+	"gpt-4": ["Chat"],
+	"gpt-4-turbo": ["Chat"],
+	"gpt-4.1": ["Chat"],
+	"gpt-4.1-mini": ["Chat"],
+	"gpt-4.1-nano": ["Chat"],
+	"gpt-4o": ["Vision", "Chat"],
+	"gpt-4o-mini": ["Vision", "Chat"],
+	"gpt-5": ["Reasoning"],
+	"gpt-5-chat-latest": ["Reasoning", "Chat"],
+	"gpt-5-mini": ["Reasoning"],
+	"gpt-5-nano": ["Reasoning"],
+	o1: ["Reasoning"],
+	"o1-mini": ["Reasoning"],
+	o3: ["Reasoning"],
+	"o3-mini": ["Reasoning"],
+	"o4-mini": ["Reasoning"],
+};
+
+function labelForModel(id: string): string {
+	const tags = MODEL_CAPABILITIES[id] || [];
+	return tags.length ? `${id} (${tags.join(", ")})` : id;
+}
+
+function genId(prefix = "profile"): string {
+	return `${prefix}_${Math.random()
+		.toString(36)
+		.slice(2, 8)}_${Date.now().toString(36)}`;
+}
+
+function ensureProfilesInitialized(settings: AiSummarizePluginSettings) {
+	if (!settings.profiles || settings.profiles.length === 0) {
+		settings.profiles = [
+			{
+				id: "default",
+				name: "Default",
+				model: settings.model || "gpt-3.5-turbo",
+				maxTokens: settings.maxTokens ?? defaultMaxTokens,
+				defaultPrompt: settings.defaultPrompt,
+				systemInstruction: settings.systemInstruction || "",
+				summaryPlacement: settings.summaryPlacement,
+			},
+		];
+		settings.activeProfileId = "default";
+	}
+}
+
+function getActiveProfile(
+	settings: AiSummarizePluginSettings
+): ModelProfile | undefined {
+	if (!settings.profiles || settings.profiles.length === 0) return undefined;
+	const id = settings.activeProfileId || settings.profiles[0].id;
+	return settings.profiles.find((p) => p.id === id) || settings.profiles[0];
+}
+
+function applyProfileToRoot(
+	settings: AiSummarizePluginSettings,
+	profile: ModelProfile
+) {
+	settings.model = profile.model;
+	settings.maxTokens = profile.maxTokens;
+	settings.defaultPrompt = profile.defaultPrompt;
+	settings.systemInstruction = profile.systemInstruction || "";
+	settings.summaryPlacement =
+		profile.summaryPlacement || settings.summaryPlacement || "replace";
+}
+
+function upsertActiveProfileFromRoot(settings: AiSummarizePluginSettings) {
+	const p = getActiveProfile(settings);
+	if (!p) return;
+	p.model = settings.model || p.model;
+	p.maxTokens = settings.maxTokens ?? p.maxTokens;
+	p.defaultPrompt = settings.defaultPrompt ?? p.defaultPrompt;
+	p.systemInstruction = settings.systemInstruction || "";
+	p.summaryPlacement =
+		settings.summaryPlacement || p.summaryPlacement || "replace";
+}
 
 export default class AiSummarizeSettingTab extends PluginSettingTab {
 	plugin: AISummarizePlugin;
@@ -30,90 +140,258 @@ export default class AiSummarizeSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 
 		containerEl.empty();
-		new Setting(containerEl).setName('General Settings').setHeading();
 
+		// Ensure profiles exist and apply the active profile to the root settings for UI binding
+		ensureProfilesInitialized(this.plugin.settings);
+		const activeProfileInit = getActiveProfile(this.plugin.settings);
+		if (activeProfileInit) {
+			applyProfileToRoot(this.plugin.settings, activeProfileInit);
+		}
+
+		// Profiles section
+		new Setting(containerEl).setName("Profiles").setHeading();
 		new Setting(containerEl)
-			.setName('API key')
-			.setTooltip('Get your OpenAI API key from https://platform.openai.com/account/api-keys')
-			.setDesc('OpenAI API key is required to use the AI Summarize plugin.')
-			.addText((text) =>
-				text
-					.setPlaceholder('Your API Key')
-					.setValue(this.plugin.settings.apiKey)
-					.onChange(async (value) => {
-						this.plugin.settings.apiKey = value;
+			.setName("Active profile")
+			.setDesc("Select which profile to use for summarization")
+			.addDropdown((dropdown) => {
+				const options: Record<string, string> = {};
+				const profiles = this.plugin.settings.profiles || [];
+				for (const p of profiles) {
+					options[p.id] = p.name || p.id;
+				}
+				dropdown
+					.addOptions(options)
+					.setValue(
+						this.plugin.settings.activeProfileId ||
+							(profiles[0] ? profiles[0].id : "default")
+					)
+					.onChange(async (id) => {
+						this.plugin.settings.activeProfileId = id;
+						const chosen = (
+							this.plugin.settings.profiles || []
+						).find((p) => p.id === id);
+						if (chosen) {
+							applyProfileToRoot(this.plugin.settings, chosen);
+							await this.plugin.saveSettings();
+							this.display();
+						}
+					});
+			})
+			.addButton((btn) =>
+				btn
+					.setButtonText("New profile")
+					.setCta()
+					.onClick(async () => {
+						const count = (this.plugin.settings.profiles || [])
+							.length;
+						const id = genId();
+						const name = `Profile ${count + 1}`;
+						const newProfile: ModelProfile = {
+							id,
+							name,
+							model:
+								this.plugin.settings.model || "gpt-3.5-turbo",
+							maxTokens:
+								this.plugin.settings.maxTokens ??
+								defaultMaxTokens,
+							defaultPrompt: this.plugin.settings.defaultPrompt,
+							systemInstruction:
+								this.plugin.settings.systemInstruction || "",
+							summaryPlacement:
+								this.plugin.settings.summaryPlacement,
+						};
+						this.plugin.settings.profiles = [
+							...(this.plugin.settings.profiles || []),
+							newProfile,
+						];
+						this.plugin.settings.activeProfileId = id;
+						applyProfileToRoot(this.plugin.settings, newProfile);
 						await this.plugin.saveSettings();
-					}),
+						this.display();
+					})
+			)
+			.addButton((btn) =>
+				btn.setButtonText("Delete profile").onClick(async () => {
+					const profiles = this.plugin.settings.profiles || [];
+					if (profiles.length <= 1) return; // keep at least one profile
+					const activeId =
+						this.plugin.settings.activeProfileId || profiles[0].id;
+					const remaining = profiles.filter((p) => p.id !== activeId);
+					this.plugin.settings.profiles = remaining;
+					this.plugin.settings.activeProfileId = remaining[0].id;
+					applyProfileToRoot(this.plugin.settings, remaining[0]);
+					await this.plugin.saveSettings();
+					this.display();
+				})
 			);
 
 		new Setting(containerEl)
-			.setName('Max tokens')
-			.setDesc('Max tokens to generate the summary. Default is 1000.')
+			.setName("Profile name")
+			.setDesc("Rename the active profile")
+			.addText((text) => {
+				const active = getActiveProfile(this.plugin.settings);
+				text.setPlaceholder("Profile name")
+					.setValue(active?.name || "")
+					.onChange(async (value) => {
+						const p = getActiveProfile(this.plugin.settings);
+						if (p) p.name = value || p.name;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl).setName("General Settings").setHeading();
+
+		new Setting(containerEl)
+			.setName("API key")
+			.setTooltip(
+				"Get your OpenAI API key from https://platform.openai.com/account/api-keys"
+			)
+			.setDesc(
+				"OpenAI API key is required to use the AI Summarize plugin."
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("Your API Key")
+					.setValue(this.plugin.settings.apiKey)
+					.onChange(async (value) => {
+						const oldApiKey = this.plugin.settings.apiKey;
+						this.plugin.settings.apiKey = value;
+						await this.plugin.saveSettings();
+
+						// Refresh available models if API key changed and is not empty
+						if (value && value !== oldApiKey) {
+							await this.plugin.refreshAvailableModels();
+							// Re-render the settings to update the model dropdown
+							this.display();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Max tokens")
+			.setDesc("Max tokens to generate the summary. Default is 1000.")
 			.addText((text) =>
 				text
 					.setPlaceholder(defaultMaxTokens.toString())
-					.setValue(this.plugin.settings.maxTokens?.toString() || defaultMaxTokens.toString())
+					.setValue(
+						this.plugin.settings.maxTokens?.toString() ||
+							defaultMaxTokens.toString()
+					)
 					.onChange(async (value) => {
 						this.plugin.settings.maxTokens = Number.parseInt(value);
+						upsertActiveProfileFromRoot(this.plugin.settings);
 						await this.plugin.saveSettings();
-					}),
+					})
 			);
 
 		new Setting(containerEl)
-			.setName('AI Model')
-			.setDesc('The AI model to use for generating the summary. Default is gpt-3.5-turbo.')
-			.addDropdown((dropdown) =>
+			.setName("AI Model")
+			.setDesc(
+				"The AI model to use for generating the summary. Default is gpt-4."
+			)
+			.setTooltip(
+				"Some models may not stream responses and could be slower. Such as gpt-5 (use gpt-5-chat-latest instead)"
+			)
+			.addDropdown((dropdown) => {
+				// Create options object from available models with capability labels
+				const options: Record<string, string> = {};
+				const availableModels = this.plugin.settings
+					.availableModels || ["gpt-3.5-turbo"];
+				for (const model of availableModels) {
+					options[model] = labelForModel(model);
+				}
+
 				dropdown
-					.addOptions({ 'gpt-3.5-turbo': 'gpt-3.5-turbo', 'gpt-4': 'gpt-4', 'gpt-4-turbo': 'gpt-4-turbo', 'gpt-4o': 'gpt-4o' })
+					.addOptions(options)
 					.setValue(this.plugin.settings.model)
 					.onChange(async (value) => {
 						this.plugin.settings.model = value;
+						upsertActiveProfileFromRoot(this.plugin.settings);
 						await this.plugin.saveSettings();
-					}),
-			);
+					});
+			});
 
 		new Setting(containerEl)
-			.setName('Default prompt')
-			.setDesc('Default prompt for the AI to generate a summary.')
+			.setName("Default prompt")
+			.setDesc("Default prompt for the AI to generate a summary.")
+
 			.addTextArea((text) =>
 				text
-					.setPlaceholder('Your custom prompt')
+					.setPlaceholder("Your custom prompt")
 					.setValue(this.plugin.settings.defaultPrompt)
 					.onChange(async (value) => {
 						this.plugin.settings.defaultPrompt = value;
+						upsertActiveProfileFromRoot(this.plugin.settings);
 						await this.plugin.saveSettings();
-					}),
+					})
 			);
 
 		new Setting(containerEl)
-			.setName('Summary in the frontmatter')
-			.setDesc('This will put the generated summary in the frontmatter of the note otherwise the selected text will be replaced by the summary.')
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.putSummaryInFrontmatter).onChange(async (value) => {
-					this.plugin.settings.putSummaryInFrontmatter = value;
-					await this.plugin.saveSettings();
-				}),
+			.setName("System instructions")
+			.setDesc(
+				"Optional system guidance for the model (tone, constraints, style)"
+			)
+			.setTooltip(
+				"You can ask for a summary in bullet points or a specific style or tone. Also you can define language constraints here (e.g. 'Respond in Turkish')."
+			)
+			.addTextArea((text) =>
+				text
+					.setPlaceholder(
+						"You are a helpful assistant that summarizes notes..."
+					)
+					.setValue(this.plugin.settings.systemInstruction || "")
+					.onChange(async (value) => {
+						this.plugin.settings.systemInstruction = value;
+						upsertActiveProfileFromRoot(this.plugin.settings);
+						await this.plugin.saveSettings();
+					})
 			);
 
-		new Setting(containerEl).setName('KNOW HOW').setHeading();
-		containerEl.createEl('p', {
-			text: 'To generate a summary, select at least 10 words within a note. You can use the context menu by right-clicking on a selection and choosing "AI Summarize", or you can use the command palette and search for "AI Summarize".',
+		new Setting(containerEl)
+			.setName("Summary placement")
+			.setDesc("Choose where the generated summary should go")
+			.addDropdown((dropdown) => {
+				const value = this.plugin.settings.summaryPlacement;
+				dropdown
+					.addOptions({
+						replace: "Replace selection",
+						below: "Insert below selection",
+						frontmatter: "Frontmatter (YAML: summary)",
+					})
+					.setValue(value)
+					.onChange(async (val) => {
+						this.plugin.settings.summaryPlacement = val as any;
+						const p = getActiveProfile(this.plugin.settings);
+						if (p) p.summaryPlacement = val as any;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl).setName("KNOW HOW").setHeading();
+		containerEl.createEl("p", {
+			text: 'To generate a summary, select at least 30 words within a note. You can use the context menu by right-clicking on a selection and choosing "AI Summarize", or you can use the command palette and search for "AI Summarize".',
 		});
 
-		new Setting(containerEl).setName('SUPPORT').setHeading();
-		const donateText = document.createElement('p');
-		donateText.textContent = 'If you find this plugin valuable and would like to support its continued development, please consider buying me a coffee:';
+		new Setting(containerEl).setName("SUPPORT").setHeading();
+		const donateText = document.createElement("p");
+		donateText.textContent =
+			"If you find this plugin valuable and would like to support its continued development, please consider buying me a coffee:";
 		containerEl.appendChild(donateText);
 
 		const parser = new DOMParser();
 
-		containerEl.appendChild(createDonateButton('https://www.buymeacoffee.com/ravenwits', parser.parseFromString(buyMeACoffee, 'text/xml').documentElement));
+		containerEl.appendChild(
+			createDonateButton(
+				"https://www.buymeacoffee.com/ravenwits",
+				parser.parseFromString(buyMeACoffee, "text/xml").documentElement
+			)
+		);
 	}
 }
 
 const createDonateButton = (link: string, img: HTMLElement): HTMLElement => {
-	const a = document.createElement('a');
-	a.setAttribute('href', link);
+	const a = document.createElement("a");
+	a.setAttribute("href", link);
 	a.appendChild(img);
 	return a;
 };

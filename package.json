@@ -1,6 +1,6 @@
 {
 	"name": "ai-summarize",
-	"version": "1.0.1",
+	"version": "2.0.0",
 	"description": "Easy to use AI Summary tool for your notes",
 	"main": "main.js",
 	"scripts": {
@@ -13,12 +13,16 @@
 	"license": "GPL-3.0",
 	"devDependencies": {
 		"@types/node": "^16.11.6",
-		"@typescript-eslint/eslint-plugin": "5.29.0",
-		"@typescript-eslint/parser": "5.29.0",
+		"@typescript-eslint/eslint-plugin": "^8.45.0",
+		"@typescript-eslint/parser": "^8.45.0",
 		"builtin-modules": "3.3.0",
 		"esbuild": "0.17.3",
+		"eslint": "^9.37.0",
 		"obsidian": "latest",
 		"tslib": "2.4.0",
-		"typescript": "^5.4.3"
+		"typescript": "^5.9.3"
+	},
+	"dependencies": {
+		"openai": "^6.1.0"
 	}
 }
