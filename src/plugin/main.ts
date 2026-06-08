@@ -1,397 +1,979 @@
-import { App, Editor, Menu, Plugin } from "obsidian";
-import Notify from "./Notify";
-import { prompt } from "./gpt";
-import AiSummarizeSettingTab, {
-	AiSummarizePluginSettings,
-	default_settings,
-} from "src/settings/settings";
+import {
+	Editor,
+	type EditorPosition,
+	MarkdownView,
+	Menu,
+	Plugin,
+	type TAbstractFile,
+	type TFile,
+	TFolder,
+} from "obsidian";
 import OpenAI from "openai";
+import {
+	contextWindowForModel,
+	estimateTokens,
+	safeInputBudget,
+	splitIntoChunks,
+	tokenBudgetToChars,
+} from "src/plugin/budget";
+import {
+	createDigestSources,
+	buildDigestPrompt,
+	buildDigestSystemInstruction,
+	collectDigestFiles,
+	digestNotice,
+	digestTitle,
+	type DigestOptions,
+} from "src/plugin/digest";
+import {
+	destinationLabel,
+	isStreamingEditorDestination,
+	writeGeneratedOutput,
+} from "src/plugin/destinations";
+import {
+	buildLinkedContext,
+	readNoteBody,
+	resolveFolderInput,
+} from "src/plugin/note-context";
+import {
+	CONTEXT_MENU_PRESETS,
+	joinInstructionSections,
+	type PromptPresetDefinition,
+} from "src/plugin/prompts";
+import ProgressNotice from "src/plugin/progress";
+import DigestModal from "src/ui/DigestModal";
+import AiSummarizeSettingTab, {
+	clampMaxTokens,
+	DEFAULT_MODEL,
+	default_settings,
+	FALLBACK_MODELS,
+	MIN_SELECTION_WORDS,
+	normalizeSettings,
+	type AiSummarizePluginSettings,
+	type SummaryPlacement,
+	upsertActiveProfileFromRoot,
+} from "src/settings/settings";
+import Notify from "./Notify";
+import { isAbortError, prompt } from "./gpt";
 
-export type EnhancedMenu = Menu & { dom: HTMLElement };
+declare module "obsidian" {
+	interface MenuItem {
+		setSubmenu?(): Menu;
+	}
+}
 
-export type EnhancedApp = App & {
-	commands: { executeCommandById: Function };
-};
+const SUPPORTED_MODEL_PREFIXES = ["gpt-4", "gpt-5", "o1", "o3", "o4"];
+const UNSUPPORTED_MODEL_MARKERS = [
+	"audio",
+	"dall-e",
+	"embedding",
+	"image",
+	"moderation",
+	"realtime",
+	"transcribe",
+	"tts",
+	"whisper",
+];
 
-export type EnhancedEditor = Editor & {
-	getSelection: Function;
-};
+function isSupportedSummaryModel(modelId: string): boolean {
+	const normalized = modelId.toLowerCase();
+	return (
+		SUPPORTED_MODEL_PREFIXES.some((prefix) =>
+			normalized.startsWith(prefix)
+		) &&
+		!UNSUPPORTED_MODEL_MARKERS.some((marker) =>
+			normalized.includes(marker)
+		)
+	);
+}
+
+function sortModels(models: string[]): string[] {
+	const preferredOrder = new Map(
+		FALLBACK_MODELS.map((model, index) => [model, index])
+	);
+	const unique = Array.from(new Set(models.filter(Boolean)));
+
+	return unique.sort((a, b) => {
+		const aIndex = preferredOrder.get(a) ?? Number.MAX_SAFE_INTEGER;
+		const bIndex = preferredOrder.get(b) ?? Number.MAX_SAFE_INTEGER;
+
+		if (aIndex !== bIndex) {
+			return aIndex - bIndex;
+		}
+
+		return a.localeCompare(b);
+	});
+}
+
+function formatError(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+
+	if (typeof error === "string") {
+		return error;
+	}
+
+	return "Unknown error.";
+}
+
+function hasMenuPosition(
+	event: MouseEvent | KeyboardEvent
+): event is MouseEvent {
+	return "clientX" in event && "clientY" in event;
+}
+
+interface RectTarget extends EventTarget {
+	getBoundingClientRect(): DOMRect;
+}
+
+function hasBoundingClientRect(target: EventTarget): target is RectTarget {
+	return (
+		"getBoundingClientRect" in target &&
+		typeof target.getBoundingClientRect === "function"
+	);
+}
+
+function getEventTargetRect(
+	event: MouseEvent | KeyboardEvent
+): DOMRect | undefined {
+	const target = event.currentTarget || event.target;
+	if (!target || !hasBoundingClientRect(target)) {
+		return undefined;
+	}
+
+	return target.getBoundingClientRect();
+}
 
 export default class AISummarizePlugin extends Plugin {
 	settings: AiSummarizePluginSettings;
-	frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
-
-	// Concurrency guard state
-	private currentRunId: number = 0;
+	private currentRunId = 0;
 	private currentAbort?: AbortController;
 
-	async getAvailableModels(): Promise<string[]> {
-		if (!this.settings.apiKey) {
-			console.log("No API key provided, using fallback models");
-			return default_settings.availableModels || ["gpt-4"];
+	async getAvailableModels(signal?: AbortSignal): Promise<string[]> {
+		const apiKey = this.settings.apiKey.trim();
+		if (!apiKey) {
+			return [...FALLBACK_MODELS];
 		}
 
 		try {
 			const client = new OpenAI({
-				apiKey: this.settings.apiKey,
+				apiKey,
 				dangerouslyAllowBrowser: true,
 			});
-			const list = await client.models.list();
-			const ids = (list.data || []).map((m: any) => m.id as string);
-			return ids
-				.filter((id: string) =>
-					[
-						"gpt-3.5-turbo",
-						"gpt-4",
-						"gpt-4-turbo",
-						"gpt-4.1",
-						"gpt-4.1-mini",
-						"gpt-4.1-nano",
-						"gpt-4o",
-						"gpt-4o-mini",
-						"gpt-5",
-						"gpt-5-chat-latest",
-						"gpt-5-mini",
-						"gpt-5-nano",
-						"o1",
-						"o3",
-						"o3-mini",
-						"o4-mini",
-					].includes(id)
-				)
-				.sort();
+			const list = await client.models.list({ signal });
+			const models = sortModels(
+				list.data
+					.map((model) => model.id)
+					.filter(isSupportedSummaryModel)
+			);
+
+			return models.length ? models : [...FALLBACK_MODELS];
 		} catch (error) {
-			console.error("Failed to fetch available models:", error);
-			// Return fallback models if API call fails
-			return default_settings.availableModels || ["gpt-4"];
+			throw new Error(
+				`Could not refresh OpenAI models: ${formatError(error)}`
+			);
 		}
 	}
 
-	async refreshAvailableModels(): Promise<void> {
-		const availableModels = await this.getAvailableModels();
-		this.settings.availableModels = availableModels;
-		await this.saveSettings();
-		console.log("Refreshed available OpenAI models:", availableModels);
-	}
-
-	// Rough token estimator and context windows for budgeting
-	private estimateTokens(text: string): number {
-		// Heuristic: ~4 chars per token for English
-		return Math.ceil((text || "").length / 4);
-	}
-
-	private contextWindowForModel(model: string | undefined): number {
-		const map: Record<string, number> = {
-			"gpt-3.5-turbo": 16000,
-			"gpt-4": 8192,
-			"gpt-4-turbo": 128000,
-			"gpt-4.1": 128000,
-			"gpt-4.1-mini": 128000,
-			"gpt-4.1-nano": 128000,
-			"gpt-4o": 128000,
-			"gpt-4o-mini": 128000,
-			"gpt-5": 200000,
-			"gpt-5-chat-latest": 200000,
-			"gpt-5-mini": 200000,
-			"gpt-5-nano": 200000,
-			o1: 200000,
-			o3: 200000,
-			"o3-mini": 200000,
-			"o4-mini": 200000,
-		};
-		if (!model) return 128000;
-		return map[model] || 128000;
-	}
-
-	private splitIntoChunks(text: string, chunkCharTarget: number): string[] {
-		if (text.length <= chunkCharTarget) return [text];
-		const paras = text.split(/\n\n+/);
-		const chunks: string[] = [];
-		let cur = "";
-		for (const p of paras) {
-			const candidate = cur.length ? cur + "\n\n" + p : p;
-			if (candidate.length <= chunkCharTarget || !cur) {
-				cur = candidate;
-			} else {
-				chunks.push(cur);
-				cur = p;
-			}
-		}
-		if (cur) chunks.push(cur);
-		return chunks;
-	}
-
-	async generateSummary(
-		selectedText: string,
-		editor: EnhancedEditor
-	): Promise<string> {
-		try {
-			const activeFile = this.app.workspace.getActiveFile();
-
-			if (!activeFile) {
-				throw new Error("No active file found.");
-			}
-
-			const title = activeFile.basename;
-			const basePrompt = `${this.settings.defaultPrompt} ${
-				title ? "title of the note is: " + title + "\n" : ""
-			}\n\n`;
-			const fullPromptPreview = `${basePrompt}${selectedText}`;
-
-			if (!!this.settings.apiKey) {
-				// Concurrency guard: cancel any previous run
-				if (this.currentAbort) {
-					try {
-						this.currentAbort.abort();
-					} catch {}
-				}
-				this.currentAbort = new AbortController();
-				const myRunId = ++this.currentRunId;
-
-				// Token budgeting and chunk plan
-				const model = this.settings.model;
-				const ctx = this.contextWindowForModel(model);
-				const inputEstimate = this.estimateTokens(fullPromptPreview);
-				const outputBudget = this.settings.maxTokens ?? 0;
-				Notify(
-					`Token estimate: ~${inputEstimate} input, ${outputBudget} output (model ${model}, ~${ctx} ctx)`
-				);
-
-				const overhead = 1000; // cushion for system/instructions and formatting
-				const maxInputAllowed = Math.max(
-					1000,
-					ctx - outputBudget - overhead
-				);
-				const needsChunking = inputEstimate > maxInputAllowed;
-
-				const placement = this.settings.summaryPlacement;
-
-				Notify(
-					needsChunking
-						? `Large selection detected (~${inputEstimate} tokens). Chunking to stay under context window...`
-						: `Generating summary...`
-				);
-
-				// Helper: throttled writer to reduce DOM churn
-				let pending = "";
-				let flushTimer: number | undefined;
-				const flushNow = () => {
-					if (!pending) return;
-					// Guard against overlap
-					if (myRunId !== this.currentRunId) {
-						pending = "";
-						return;
-					}
-					editor.replaceSelection(pending);
-					pending = "";
-				};
-				const queueWrite = (s: string) => {
-					if (!s) return;
-					pending += s;
-					// flush after N chars or after ~50ms
-					if (pending.length > 96) {
-						flushNow();
-						if (flushTimer) {
-							window.clearTimeout(flushTimer);
-							flushTimer = undefined as any;
-						}
-					} else {
-						if (flushTimer) window.clearTimeout(flushTimer);
-						flushTimer = window.setTimeout(() => {
-							flushTimer = undefined as any;
-							flushNow();
-						}, 50) as any;
-					}
-				};
-
-				let message = "Summary updated successfully.";
-				(async () => {
-					let finalSummary = "";
-
-					const writeHeader = (text: string) => {
-						if (placement === "frontmatter") return;
-						queueWrite(text);
-						flushNow();
-					};
-
-					// If placing below, move cursor to end of selection and add one blank line
-					if (placement === "below") {
-						const to = (editor as any).getCursor
-							? (editor as any).getCursor("to")
-							: null;
-						if (to) {
-							(editor as any).setCursor(to);
-						}
-						queueWrite("\n");
-						flushNow();
-					}
-
-					const runChunk = async (
-						chunkText: string,
-						idx: number,
-						total: number,
-						perChunkMax: number
-					) => {
-						let chunkSummary = "";
-						const promptText = `${basePrompt}${chunkText}`;
-						let prefix = "";
-						if (needsChunking && placement !== "frontmatter") {
-							prefix =
-								(idx === 0 ? "" : "\n\n") +
-								`Part ${idx + 1}/${total}: `;
-							writeHeader(prefix);
-						}
-						for await (const delta of prompt(
-							promptText,
-							this.settings.apiKey,
-							perChunkMax,
-							this.settings.model,
-							this.settings.systemInstruction,
-							{ signal: this.currentAbort?.signal }
-						)) {
-							if (myRunId !== this.currentRunId) return "";
-							chunkSummary += delta;
-							if (placement !== "frontmatter") queueWrite(delta);
-						}
-						flushNow();
-						return chunkSummary;
-					};
-
-					if (!needsChunking) {
-						// Single call path
-						let single = "";
-						for await (const delta of prompt(
-							fullPromptPreview,
-							this.settings.apiKey,
-							this.settings.maxTokens,
-							this.settings.model,
-							this.settings.systemInstruction,
-							{ signal: this.currentAbort?.signal }
-						)) {
-							if (myRunId !== this.currentRunId) return;
-							single += delta;
-							if (placement !== "frontmatter") queueWrite(delta);
-						}
-						flushNow();
-						finalSummary = single;
-					} else {
-						// Chunking pipeline
-						const availableForInput = Math.max(
-							2000,
-							ctx - outputBudget - overhead
-						);
-						const chunkTokens = Math.max(
-							3000,
-							Math.min(6000, Math.floor(availableForInput * 0.9))
-						);
-						const chunkChars = chunkTokens * 4;
-						const parts = this.splitIntoChunks(
-							selectedText,
-							chunkChars
-						);
-						const perChunkMax = Math.min(
-							512,
-							this.settings.maxTokens
-						);
-						const chunkSummaries: string[] = [];
-						for (let i = 0; i < parts.length; i++) {
-							if (myRunId !== this.currentRunId) return;
-							const cs = await runChunk(
-								parts[i],
-								i,
-								parts.length,
-								perChunkMax
-							);
-							chunkSummaries.push(cs);
-						}
-						// Now produce a final "summary of summaries"
-						const metaPrompt = `${basePrompt}You will be given N partial summaries. Produce a concise, coherent single summary that captures the overall content without repetition. Keep it under ${
-							this.settings.maxTokens
-						} tokens.\n\nPartial summaries:\n${chunkSummaries
-							.map((s, i) => `(${i + 1}) ${s}`)
-							.join("\n\n")}`;
-						if (placement !== "frontmatter") {
-							writeHeader("\n\nFinal summary:\n");
-						}
-						let finalText = "";
-						for await (const delta of prompt(
-							metaPrompt,
-							this.settings.apiKey,
-							this.settings.maxTokens,
-							this.settings.model,
-							this.settings.systemInstruction,
-							{ signal: this.currentAbort?.signal }
-						)) {
-							if (myRunId !== this.currentRunId) return;
-							finalText += delta;
-							if (placement !== "frontmatter") queueWrite(delta);
-						}
-						flushNow();
-						finalSummary = finalText;
-					}
-
-					// Persist to frontmatter if requested
-					if (placement === "frontmatter") {
-						this.app.fileManager.processFrontMatter(
-							activeFile,
-							(fm) => {
-								fm["summary"] = finalSummary;
-							}
-						);
-					}
-
-					// Message per placement
-					if (placement === "frontmatter") {
-						message = "Summary added to frontmatter.";
-					} else if (placement === "replace") {
-						message = "Selection summarized successfully.";
-					} else if (placement === "below") {
-						message = "Summary inserted below selection.";
-					}
-					Notify(message);
-				})();
-			} else {
-				throw new Error(
-					"Please enter your OpenAI API Key in the settings."
-				);
-			}
-		} catch (error) {
-			Notify(error);
-			return;
-		}
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			default_settings,
-			await this.loadData()
-		);
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-
-	async onload() {
-		await this.loadSettings();
-		console.log(`AI Summarize v${this.manifest.version} loaded!`);
-
-		// Fetch available models on plugin initialization
-		const availableModels = await this.getAvailableModels();
+	async refreshAvailableModels(signal?: AbortSignal): Promise<string[]> {
+		const availableModels = await this.getAvailableModels(signal);
 		this.settings.availableModels = availableModels;
 
-		// Ensure the current model is valid, fallback to first available if not
 		if (
 			!this.settings.model ||
 			!availableModels.includes(this.settings.model)
 		) {
-			this.settings.model = availableModels[0] || "gpt-4";
+			this.settings.model = availableModels[0] || DEFAULT_MODEL;
+			upsertActiveProfileFromRoot(this.settings);
 		}
 
 		await this.saveSettings();
-		console.log("Available OpenAI models:", availableModels);
-		console.log("Selected model:", this.settings.model);
+		return availableModels;
+	}
+
+	async refreshAvailableModelsWithProgress(): Promise<void> {
+		const { abortController, runId, isCurrentRun } = this.startRun();
+		const progress = new ProgressNotice("Refreshing OpenAI models.", {
+			onCancel: () => {
+				this.cancelCurrentRun();
+			},
+		});
+
+		try {
+			const models = await this.refreshAvailableModels(abortController.signal);
+			if (!isCurrentRun()) {
+				progress.hide();
+				return;
+			}
+
+			progress.finish(`Model list refreshed (${models.length} models).`);
+		} catch (error) {
+			if (isAbortError(error) || abortController.signal.aborted) {
+				progress.finish("Operation cancelled.");
+			} else if (isCurrentRun()) {
+				progress.finish(`Error: ${formatError(error)}`);
+			}
+		} finally {
+			this.finishRun(runId);
+		}
+	}
+
+	private advancePosition(
+		position: EditorPosition,
+		insertedText: string
+	): EditorPosition {
+		const lines = insertedText.split("\n");
+		if (lines.length === 1) {
+			return { line: position.line, ch: position.ch + insertedText.length };
+		}
+
+		return {
+			line: position.line + lines.length - 1,
+			ch: lines[lines.length - 1].length,
+		};
+	}
+
+	private countWords(text: string): number {
+		const words = text.trim().split(/\s+/).filter(Boolean);
+		return words.length;
+	}
+
+	private canSummarize(text: string): boolean {
+		return this.countWords(text) >= MIN_SELECTION_WORDS;
+	}
+
+	private selectionTooShortMessage(): string {
+		return `Selected text is too short. Select at least ${MIN_SELECTION_WORDS} words.`;
+	}
+
+	private summarizeCurrentSelection(
+		editor: Editor,
+		preset?: PromptPresetDefinition
+	): void {
+		const selected = editor.getSelection();
+		if (!this.canSummarize(selected)) {
+			Notify(this.selectionTooShortMessage());
+			return;
+		}
+
+		void this.generateSummary(selected, editor, preset);
+	}
+
+	private addPresetMenuItems(menu: Menu, editor: Editor): void {
+		menu.addItem((item) => {
+			item.setTitle("Active profile summary")
+				.setIcon("lucide-bot")
+				.onClick(() => {
+					this.summarizeCurrentSelection(editor);
+				});
+		});
+
+		let currentGroup: string | undefined;
+		for (const preset of CONTEXT_MENU_PRESETS) {
+			if (currentGroup !== preset.group) {
+				currentGroup = preset.group;
+				menu.addSeparator();
+				menu.addItem((item) => {
+					item.setTitle(this.presetGroupLabel(preset.group)).setIsLabel(true);
+				});
+			}
+
+			menu.addItem((item) => {
+				item.setTitle(preset.name)
+					.setIcon(preset.icon)
+					.onClick(() => {
+						this.summarizeCurrentSelection(editor, preset);
+					});
+			});
+		}
+	}
+
+	private presetGroupLabel(group: PromptPresetDefinition["group"]): string {
+		if (group === "review") {
+			return "Review";
+		}
+
+		if (group === "open-loops") {
+			return "Open loops";
+		}
+
+		return "Summaries";
+	}
+
+	private startRun(): {
+		abortController: AbortController;
+		runId: number;
+		isCurrentRun: () => boolean;
+	} {
+		this.currentAbort?.abort();
+		const abortController = new AbortController();
+		this.currentAbort = abortController;
+		const runId = ++this.currentRunId;
+
+		return {
+			abortController,
+			runId,
+			isCurrentRun: () =>
+				runId === this.currentRunId && !abortController.signal.aborted,
+		};
+	}
+
+	private finishRun(runId: number): void {
+		if (runId === this.currentRunId) {
+			this.currentAbort = undefined;
+		}
+	}
+
+	private cancelCurrentRun(): boolean {
+		if (!this.currentAbort || this.currentAbort.signal.aborted) {
+			return false;
+		}
+
+		this.currentAbort.abort();
+		return true;
+	}
+
+	private async collectCompletion(
+		input: string,
+		maxTokens: number,
+		model: string,
+		systemInstruction: string,
+		abortController: AbortController,
+		isCurrentRun: () => boolean
+	): Promise<string> {
+		let output = "";
+		for await (const delta of prompt(
+			input,
+			this.settings.apiKey.trim(),
+			maxTokens,
+			model,
+			systemInstruction,
+			{ signal: abortController.signal }
+		)) {
+			if (!isCurrentRun()) {
+				return "";
+			}
+
+			output += delta;
+		}
+
+		return output;
+	}
+
+	private async generateTextFromContent(options: {
+		content: string;
+		title: string;
+		preset?: PromptPresetDefinition;
+		linkedContext?: string;
+		abortController: AbortController;
+		isCurrentRun: () => boolean;
+	}): Promise<string> {
+		const model = this.settings.model || DEFAULT_MODEL;
+		const outputBudget = clampMaxTokens(this.settings.maxTokens);
+		const systemInstruction = joinInstructionSections(
+			this.settings.systemInstruction,
+			options.preset?.systemInstruction
+		);
+		const promptInstructions = joinInstructionSections(
+			this.settings.defaultPrompt,
+			options.preset?.promptInstruction
+		);
+		const contextSection = options.linkedContext
+			? `${options.linkedContext}\n\n`
+			: "";
+		const basePrompt = `${promptInstructions}\n\nTitle of the note: ${options.title}\n\n${contextSection}`;
+		const fullPrompt = `${basePrompt}${options.content}`;
+		const maxInputAllowed = safeInputBudget(model, outputBudget);
+
+		if (estimateTokens(fullPrompt) <= maxInputAllowed) {
+			return this.collectCompletion(
+				fullPrompt,
+				outputBudget,
+				model,
+				systemInstruction,
+				options.abortController,
+				options.isCurrentRun
+			);
+		}
+
+		const chunkTokens = Math.max(
+			3000,
+			Math.min(6000, Math.floor(maxInputAllowed * 0.8))
+		);
+		const chunks = splitIntoChunks(
+			options.content,
+			tokenBudgetToChars(chunkTokens)
+		);
+		const chunkSummaries: string[] = [];
+
+		for (let index = 0; index < chunks.length; index++) {
+			if (!options.isCurrentRun()) {
+				return "";
+			}
+
+			const chunkPrompt = `${basePrompt}Summarize part ${index + 1}/${chunks.length} of the note for later synthesis.\n\n${chunks[index]}`;
+			const summary = await this.collectCompletion(
+				chunkPrompt,
+				Math.min(512, outputBudget),
+				model,
+				systemInstruction,
+				options.abortController,
+				options.isCurrentRun
+			);
+			chunkSummaries.push(summary);
+		}
+
+		const metaPrompt = `${basePrompt}You will be given partial summaries. Produce one coherent final result in the requested format without repetition. Keep it under ${outputBudget} tokens.\n\nPartial summaries:\n${chunkSummaries
+			.map((summary, index) => `(${index + 1}) ${summary}`)
+			.join("\n\n")}`;
+
+		return this.collectCompletion(
+			metaPrompt,
+			outputBudget,
+			model,
+			systemInstruction,
+			options.abortController,
+			options.isCurrentRun
+		);
+	}
+
+	private noteOutputDestination(): SummaryPlacement {
+		const destination = this.settings.summaryPlacement || "append-current";
+		return destination === "replace" || destination === "below"
+			? "append-current"
+			: destination;
+	}
+
+	private getActiveEditorForFile(file: TFile): Editor | undefined {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		return view?.file?.path === file.path ? view.editor : undefined;
+	}
+
+	async summarizeCurrentNote(): Promise<void> {
+		if (!this.settings.apiKey.trim()) {
+			Notify("Enter your OpenAI API key in settings first.");
+			return;
+		}
+
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			Notify("No active file found.");
+			return;
+		}
+
+		const { abortController, runId, isCurrentRun } = this.startRun();
+		const progress = new ProgressNotice("Preparing full note summary.", {
+			onCancel: () => {
+				this.cancelCurrentRun();
+			},
+		});
+		try {
+			const model = this.settings.model || DEFAULT_MODEL;
+			const outputBudget = clampMaxTokens(this.settings.maxTokens);
+			progress.update("Reading active note.");
+			const content = await readNoteBody(this.app, activeFile);
+			let linkedContext = "";
+
+			if (this.settings.linkAwareFullNoteSummaries) {
+				progress.update("Building linked note context.");
+				const inputBudget = safeInputBudget(model, outputBudget);
+				const linkedBudget = Math.min(Math.floor(inputBudget * 0.2), 12000);
+				const result = await buildLinkedContext(
+					this.app,
+					activeFile,
+					linkedBudget
+				);
+				linkedContext = result.text;
+				if (result.limited) {
+					Notify("Linked context was limited for this model.");
+				}
+			}
+
+			progress.update("Generating full note summary.");
+			const output = await this.generateTextFromContent({
+				content,
+				title: activeFile.basename,
+				linkedContext,
+				abortController,
+				isCurrentRun,
+			});
+
+			if (!isCurrentRun()) {
+				progress.hide();
+				return;
+			}
+
+			progress.update(`Writing output to ${destinationLabel(this.noteOutputDestination())}.`);
+			const message = await writeGeneratedOutput({
+				app: this.app,
+				activeFile,
+				editor: this.getActiveEditorForFile(activeFile),
+				destination: this.noteOutputDestination(),
+				text: output,
+				title: "AI summary",
+			});
+			progress.finish(message);
+		} catch (error) {
+			if (isAbortError(error) || abortController.signal.aborted) {
+				progress.finish("Operation cancelled.");
+			} else if (isCurrentRun()) {
+				progress.finish(`Error: ${formatError(error)}`);
+			}
+		} finally {
+			this.finishRun(runId);
+		}
+	}
+
+	openDigestModal(initialFolderPath = "/"): void {
+		new DigestModal(this.app, (options, destination) => {
+			void this.createDigestFromFolder(options, destination);
+		}, initialFolderPath).open();
+	}
+
+	async createDigestFromFolder(
+		options: DigestOptions,
+		destination: SummaryPlacement
+	): Promise<void> {
+		if (!this.settings.apiKey.trim()) {
+			Notify("Enter your OpenAI API key in settings first.");
+			return;
+		}
+
+		const { abortController, runId, isCurrentRun } = this.startRun();
+		const progress = new ProgressNotice("Preparing folder digest.", {
+			onCancel: () => {
+				this.cancelCurrentRun();
+			},
+		});
+		try {
+			progress.update("Collecting notes from folder.");
+			const collection = collectDigestFiles(this.app, options);
+			const digestFolder = resolveFolderInput(this.app, options.folderPath);
+			if (!collection.files.length) {
+				progress.hide();
+				Notify("No markdown notes found for this digest.");
+				return;
+			}
+
+			progress.update(digestNotice(collection.files, collection.estimatedTokens));
+			const model = this.settings.model || DEFAULT_MODEL;
+			const sources = await createDigestSources(
+				this.app,
+				collection.files,
+				async (file: TFile, content: string) => {
+					const input = `Summarize this source note in 3-5 concise bullets for a later folder digest. Preserve concrete decisions, action items, names, dates, and open questions.\n\nTitle: ${file.basename}\nPath: ${file.path}\n\n${content}`;
+					return this.collectCompletion(
+						input,
+						400,
+						model,
+						this.settings.systemInstruction || "",
+						abortController,
+						isCurrentRun
+					);
+				},
+				({ file, index, total, phase }) => {
+					const action =
+						phase === "cache" ? "Using cached summary" : "Summarizing";
+					progress.update(`${action} ${index}/${total}: ${file.basename}`);
+				}
+			);
+
+			if (!isCurrentRun()) {
+				progress.hide();
+				return;
+			}
+
+			progress.update("Generating final digest.");
+			const outputBudget = clampMaxTokens(this.settings.maxTokens);
+			const promptText = buildDigestPrompt(
+				options,
+				sources,
+				this.settings.defaultPrompt,
+				safeInputBudget(model, outputBudget)
+			);
+			const systemInstruction = buildDigestSystemInstruction(
+				options.digestType,
+				this.settings.systemInstruction
+			);
+			const digest = await this.collectCompletion(
+				promptText,
+				outputBudget,
+				model,
+				systemInstruction,
+				abortController,
+				isCurrentRun
+			);
+
+			if (!isCurrentRun()) {
+				progress.hide();
+				return;
+			}
+
+			if (destination === "frontmatter") {
+				throw new Error(
+					"Folder digests cannot be written to frontmatter. Choose another destination."
+				);
+			}
+
+			const digestDestination = destination;
+			const anchorFile =
+				digestDestination === "append-current"
+					? this.app.workspace.getActiveFile()
+					: collection.files[0];
+			if (!anchorFile) {
+				throw new Error("Open a note before appending a digest to the current note.");
+			}
+			progress.update(`Writing digest to ${destinationLabel(digestDestination)}.`);
+			const message = await writeGeneratedOutput({
+				app: this.app,
+				activeFile: anchorFile,
+				editor:
+					digestDestination === "append-current"
+						? this.getActiveEditorForFile(anchorFile)
+						: undefined,
+				destination: digestDestination,
+				text: digest,
+				title: digestTitle(options.digestType),
+				targetFolderPath: digestFolder?.path || "",
+				baseName: digestFolder?.name || "Vault",
+			});
+			progress.finish(message);
+		} catch (error) {
+			if (isAbortError(error) || abortController.signal.aborted) {
+				progress.finish("Operation cancelled.");
+			} else if (isCurrentRun()) {
+				progress.finish(`Error: ${formatError(error)}`);
+			}
+		} finally {
+			this.finishRun(runId);
+		}
+	}
+
+	private openPresetMenu(
+		event: MouseEvent | KeyboardEvent,
+		editor: Editor
+	): void {
+		const presetMenu = new Menu();
+		this.addPresetMenuItems(presetMenu, editor);
+
+		const targetRect = getEventTargetRect(event);
+		if (targetRect) {
+			presetMenu.showAtPosition({ x: targetRect.right + 4, y: targetRect.top });
+			return;
+		}
+
+		if (hasMenuPosition(event) && (event.clientX !== 0 || event.clientY !== 0)) {
+			presetMenu.showAtPosition({ x: event.clientX, y: event.clientY });
+			return;
+		}
+
+		const rect = this.app.workspace.containerEl.getBoundingClientRect();
+		presetMenu.showAtPosition(
+			{ x: rect.left + 24, y: rect.top + 24 },
+			this.app.workspace.containerEl.ownerDocument
+		);
+	}
+
+	async generateSummary(
+		selectedText: string,
+		editor: Editor,
+		preset?: PromptPresetDefinition
+	): Promise<void> {
+		const apiKey = this.settings.apiKey.trim();
+		if (!apiKey) {
+			Notify("Enter your OpenAI API key in settings first.");
+			return;
+		}
+
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			Notify("No active file found.");
+			return;
+		}
+
+		const { abortController, runId, isCurrentRun } = this.startRun();
+		const progress = new ProgressNotice("Preparing selection summary.", {
+			onCancel: () => {
+				this.cancelCurrentRun();
+			},
+		});
+
+		let pending = "";
+		let flushTimer: number | undefined;
+		let insertPosition: EditorPosition | undefined;
+		let replaceFrom: EditorPosition | undefined;
+		let replaceTo: EditorPosition | undefined;
+
+		const placement = this.settings.summaryPlacement || "replace";
+		const model = this.settings.model || DEFAULT_MODEL;
+		const outputBudget = clampMaxTokens(this.settings.maxTokens);
+		const systemInstruction = joinInstructionSections(
+			this.settings.systemInstruction,
+			preset?.systemInstruction
+		);
+		const clearFlushTimer = () => {
+			if (flushTimer !== undefined) {
+				window.clearTimeout(flushTimer);
+				flushTimer = undefined;
+			}
+		};
+
+		const writeToEditor = (text: string) => {
+			if (!text || !isStreamingEditorDestination(placement) || !insertPosition) {
+				return;
+			}
+
+			editor.replaceRange(text, insertPosition);
+			insertPosition = this.advancePosition(insertPosition, text);
+		};
+
+		const flushNow = () => {
+			clearFlushTimer();
+			if (!pending) {
+				return;
+			}
+
+			if (!isCurrentRun()) {
+				pending = "";
+				return;
+			}
+
+			writeToEditor(pending);
+			pending = "";
+		};
+
+		const queueWrite = (text: string) => {
+			if (!text || !isStreamingEditorDestination(placement)) {
+				return;
+			}
+
+			pending += text;
+			if (pending.length > 96) {
+				flushNow();
+				return;
+			}
+
+			clearFlushTimer();
+			flushTimer = window.setTimeout(flushNow, 50);
+		};
+
+		const writeHeader = (text: string) => {
+			queueWrite(text);
+			flushNow();
+		};
+
+		try {
+			progress.update("Preparing editor output.");
+			if (placement === "replace") {
+				const from = editor.getCursor("from");
+				const to = editor.getCursor("to");
+				replaceFrom = from;
+				replaceTo = to;
+			} else if (placement === "below") {
+				insertPosition = editor.getCursor("to");
+				writeToEditor("\n");
+			}
+
+			const title = activeFile.basename;
+			const promptInstructions = joinInstructionSections(
+				this.settings.defaultPrompt,
+				preset?.promptInstruction
+			);
+			const basePrompt = `${promptInstructions}\n\n${
+				title ? `Title of the note: ${title}\n\n` : ""
+			}`;
+			const fullPromptPreview = `${basePrompt}${selectedText}`;
+			const contextWindow = contextWindowForModel(model);
+			const inputEstimate = estimateTokens(fullPromptPreview);
+			const overhead = 1000;
+			const maxInputAllowed = Math.max(
+				1000,
+				contextWindow - outputBudget - overhead
+			);
+			const needsChunking = inputEstimate > maxInputAllowed;
+
+			progress.update(
+				needsChunking
+					? `Large selection detected (~${inputEstimate} tokens). Summarizing in chunks.`
+					: `Generating ${preset ? preset.name.toLowerCase() : "summary"}.`
+			);
+
+			let finalSummary = "";
+
+			const runChunk = async (
+				chunkText: string,
+				index: number,
+				total: number,
+				perChunkMax: number
+			): Promise<string> => {
+				let chunkSummary = "";
+				const promptText = `${basePrompt}${chunkText}`;
+
+				if (needsChunking && placement !== "frontmatter") {
+					progress.update(`Summarizing chunk ${index + 1}/${total}.`);
+					writeHeader(
+						`${index === 0 ? "" : "\n\n"}Part ${index + 1}/${total}: `
+					);
+				}
+
+				for await (const delta of prompt(
+					promptText,
+					apiKey,
+					perChunkMax,
+					model,
+					systemInstruction,
+					{ signal: abortController.signal }
+				)) {
+					if (!isCurrentRun()) {
+						progress.hide();
+						return "";
+					}
+
+					chunkSummary += delta;
+					queueWrite(delta);
+				}
+
+				flushNow();
+				return chunkSummary;
+			};
+
+			if (!needsChunking) {
+				let singleSummary = "";
+				for await (const delta of prompt(
+					fullPromptPreview,
+					apiKey,
+					outputBudget,
+					model,
+					systemInstruction,
+					{ signal: abortController.signal }
+				)) {
+					if (!isCurrentRun()) {
+						progress.hide();
+						return;
+					}
+
+					singleSummary += delta;
+					queueWrite(delta);
+				}
+
+				flushNow();
+				finalSummary = singleSummary;
+			} else {
+				const availableForInput = Math.max(
+					2000,
+					contextWindow - outputBudget - overhead
+				);
+				const chunkTokens = Math.max(
+					3000,
+					Math.min(6000, Math.floor(availableForInput * 0.9))
+				);
+				const parts = splitIntoChunks(selectedText, chunkTokens * 4);
+				const perChunkMax = Math.min(512, outputBudget);
+				const chunkSummaries: string[] = [];
+
+				for (let index = 0; index < parts.length; index++) {
+					if (!isCurrentRun()) {
+						progress.hide();
+						return;
+					}
+
+					const chunkSummary = await runChunk(
+						parts[index],
+						index,
+						parts.length,
+						perChunkMax
+					);
+					chunkSummaries.push(chunkSummary);
+				}
+
+				const metaPrompt = `${basePrompt}You will be given partial summaries. Produce one coherent final result in the requested format without repetition. Keep it under ${outputBudget} tokens.\n\nPartial summaries:\n${chunkSummaries
+					.map((summary, index) => `(${index + 1}) ${summary}`)
+					.join("\n\n")}`;
+
+				if (placement !== "frontmatter") {
+					writeHeader("\n\nFinal summary:\n");
+				}
+
+				progress.update("Generating final summary.");
+				let finalText = "";
+				for await (const delta of prompt(
+					metaPrompt,
+					apiKey,
+					outputBudget,
+					model,
+					systemInstruction,
+					{ signal: abortController.signal }
+				)) {
+					if (!isCurrentRun()) {
+						progress.hide();
+						return;
+					}
+
+					finalText += delta;
+					queueWrite(delta);
+				}
+
+				flushNow();
+				finalSummary = finalText;
+			}
+
+			if (!isCurrentRun()) {
+				progress.hide();
+				return;
+			}
+
+			if (placement === "replace" && replaceFrom && replaceTo) {
+				editor.replaceRange(finalSummary.trim(), replaceFrom, replaceTo);
+				progress.finish("Selection summarized successfully.");
+				return;
+			}
+
+			progress.update(`Writing output to ${destinationLabel(placement)}.`);
+			const message = await writeGeneratedOutput({
+				app: this.app,
+				activeFile,
+				editor,
+				destination: placement,
+				text: finalSummary,
+				title: preset?.name || "AI summary",
+			});
+			progress.finish(message);
+		} catch (error) {
+			if (isAbortError(error) || abortController.signal.aborted) {
+				progress.finish("Operation cancelled.");
+			} else if (isCurrentRun()) {
+				progress.finish(`Error: ${formatError(error)}`);
+			}
+		} finally {
+			clearFlushTimer();
+			this.finishRun(runId);
+		}
+	}
+
+	async loadSettings(): Promise<void> {
+		const loaded = (await this.loadData()) as Partial<AiSummarizePluginSettings> | null;
+		this.settings = {
+			...default_settings,
+			...(loaded || {}),
+			availableModels: loaded?.availableModels
+				? [...loaded.availableModels]
+				: [...(default_settings.availableModels || [])],
+			profiles: loaded?.profiles
+				? loaded.profiles.map((profile) => ({ ...profile }))
+				: default_settings.profiles?.map((profile) => ({ ...profile })),
+		};
+		normalizeSettings(this.settings);
+	}
+
+	async saveSettings(): Promise<void> {
+		normalizeSettings(this.settings);
+		await this.saveData(this.settings);
+	}
+
+	async onload(): Promise<void> {
+		await this.loadSettings();
+		await this.saveSettings();
 
 		this.registerEvent(
 			this.app.workspace.on(
@@ -399,59 +981,100 @@ export default class AISummarizePlugin extends Plugin {
 				this.handleHighlighterInContextMenu
 			)
 		);
+		this.registerEvent(
+			this.app.workspace.on("file-menu", this.handleFileMenu)
+		);
 
 		this.addCommand({
 			id: "summarize-selection",
 			name: "Summarize selection",
 			icon: "lucide-bot",
-			editorCallback: (editor, ctx) => {
-				const selected = editor.getSelection();
-				const wordCount = selected.split(" ").length;
-
-				if (selected) {
-					if (wordCount > 30) {
-						this.generateSummary(selected, editor);
-						return true;
-					}
-
-					Notify("Selected text is too short! (>30 words)");
-					return false;
-				}
+			editorCallback: (editor) => {
+				this.summarizeCurrentSelection(editor);
 			},
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
+		this.addCommand({
+			id: "summarize-current-note",
+			name: "Summarize current note",
+			icon: "lucide-file-text",
+			callback: () => {
+				void this.summarizeCurrentNote();
+			},
+		});
+
+		this.addCommand({
+			id: "create-digest-from-folder",
+			name: "Create digest from folder",
+			icon: "lucide-folder-search",
+			callback: () => {
+				this.openDigestModal();
+			},
+		});
+
+		this.addCommand({
+			id: "cancel-current-operation",
+			name: "Cancel current operation",
+			icon: "lucide-circle-stop",
+			callback: () => {
+				Notify(
+					this.cancelCurrentRun()
+						? "Current operation cancelled."
+						: "No operation is currently running."
+				);
+			},
+		});
+
+		this.addCommand({
+			id: "refresh-models",
+			name: "Refresh models",
+			callback: () => {
+				void this.refreshAvailableModelsWithProgress();
+			},
+		});
+
 		this.addSettingTab(new AiSummarizeSettingTab(this.app, this));
 	}
 
-	async onunload() {
-		console.log("unloading plugin of Ravenwits!");
+	onunload(): void {
+		this.currentAbort?.abort();
 	}
 
-	handleHighlighterInContextMenu = (
-		menu: Menu,
-		editor: EnhancedEditor
-	): void => {
-		const selection = editor.getSelection();
-		if (selection) {
-			menu.addSeparator();
-			menu.addItem((item) => {
-				item.setTitle("AI summarize")
-					.setIcon("lucide-bot")
-					.onClick((e) => {
-						if (editor.getSelection()) {
-							const selected = editor.getSelection();
-							const wordCount = selected.split(" ").length;
-
-							if (wordCount > 30) {
-								this.generateSummary(selection, editor);
-							} else
-								Notify(
-									"Selected text is too short! (>30 words)"
-								);
-						}
-					});
-			});
+	handleHighlighterInContextMenu = (menu: Menu, editor: Editor): void => {
+		if (!this.canSummarize(editor.getSelection())) {
+			return;
 		}
+
+		menu.setUseNativeMenu(false);
+		menu.addSeparator();
+		menu.addItem((item) => {
+			item.setTitle("AI summarize")
+				.setIcon("lucide-bot");
+
+			const submenu = item.setSubmenu?.();
+			if (submenu) {
+				this.addPresetMenuItems(submenu, editor);
+				return;
+			}
+
+			item.onClick((event) => {
+				this.openPresetMenu(event, editor);
+			});
+		});
+	};
+
+	handleFileMenu = (menu: Menu, file: TAbstractFile): void => {
+		if (!(file instanceof TFolder)) {
+			return;
+		}
+
+		menu.addSeparator();
+		menu.addItem((item) => {
+			item.setTitle("Create AI digest")
+				.setIcon("lucide-folder-search")
+				.onClick(() => {
+					this.openDigestModal(file.path || "/");
+				});
+		});
 	};
 }

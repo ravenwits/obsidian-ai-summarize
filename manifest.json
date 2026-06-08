@@ -1,9 +1,9 @@
 {
 	"id": "ai-summarize",
 	"name": "AI Summarize",
-	"version": "2.0.0",
+	"version": "2.6.10",
 	"minAppVersion": "1.5.11",
-	"description": "Summarize your notes using AI",
+	"description": "Summarize your notes using AI.",
 	"author": "Alp Sariyer",
 	"authorUrl": "https://www.alpsariyer.dev",
 	"fundingUrl": {

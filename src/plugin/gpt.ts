@@ -1,92 +1,104 @@
-import OpenAI from "openai";
+import OpenAI, { APIUserAbortError } from "openai";
+import type { ResponseCreateAndStreamParams } from "openai/lib/responses/ResponseStream";
 
-// Stream a summary using the official OpenAI SDK (Responses API)
-// Yields tokens as they arrive for good UX in the editor.
-export async function* prompt(
-	prompt: string,
-	apiKey: string,
-	maxTokens: number,
-	model: string = "gpt-4o-mini",
-	instructions?: string,
-	options?: { signal?: AbortSignal }
-) {
-	// Initialize the client for browser environment (Obsidian renderer)
-	const client = new OpenAI({ apiKey, dangerouslyAllowBrowser: true });
-	console.log(`Making request to model: ${model}`);
+const REASONING_MODEL_PREFIXES = ["gpt-5", "o1", "o3", "o4"];
 
-	// Prefer Responses API for all models (especially GPT-5 and reasoning models)
-	// Token limit param for Responses API is max_output_tokens.
-	const isReasoningModel =
-		model.startsWith("gpt-5") ||
-		model.startsWith("o1") ||
-		model.startsWith("o3") ||
-		model.startsWith("o4");
-	const request: any = {
-		model,
-		input: prompt,
-		max_output_tokens: maxTokens,
-	};
-	if (instructions && instructions.trim().length > 0) {
-		request.instructions = instructions;
+export function isAbortError(error: unknown): boolean {
+	if (error instanceof APIUserAbortError) {
+		return true;
 	}
-	// Only set temperature for non-reasoning chat models (reasoning models reject it)
-	if (!isReasoningModel) {
+
+	if (error instanceof DOMException && error.name === "AbortError") {
+		return true;
+	}
+
+	return (
+		error instanceof Error &&
+		/abort|aborted|cancelled|canceled/i.test(error.message)
+	);
+}
+
+function isReasoningModel(model: string): boolean {
+	return REASONING_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
+}
+
+function buildRequest(
+	input: string,
+	maxTokens: number,
+	model: string,
+	instructions?: string
+): ResponseCreateAndStreamParams {
+	const request: ResponseCreateAndStreamParams = {
+		model,
+		input,
+		max_output_tokens: Math.max(1, Math.trunc(maxTokens)),
+	};
+
+	const trimmedInstructions = instructions?.trim();
+	if (trimmedInstructions) {
+		request.instructions = trimmedInstructions;
+	}
+
+	if (!isReasoningModel(model)) {
 		request.temperature = 0.7;
 	}
 
+	return request;
+}
+
+export async function* prompt(
+	input: string,
+	apiKey: string,
+	maxTokens: number,
+	model = "gpt-4o-mini",
+	instructions?: string,
+	options?: { signal?: AbortSignal }
+) {
+	const client = new OpenAI({ apiKey, dangerouslyAllowBrowser: true });
+	const request = buildRequest(input, maxTokens, model, instructions);
 	let fullText = "";
 
 	try {
-		// Use streaming for best UX
-		const stream = await (client as any).responses.stream(request);
+		const stream = client.responses.stream(request, {
+			maxRetries: 0,
+			signal: options?.signal,
+		});
 
-		// Wire abort signal to stream abort for concurrency guard
-		if (options?.signal && (stream as any)?.controller?.abort) {
-			const onAbort = () => {
-				try {
-					(stream as any).controller.abort();
-				} catch (e) {
-					console.warn("Failed to abort stream controller", e);
-				}
-			};
-			if (options.signal.aborted) onAbort();
-			else options.signal.addEventListener("abort", onAbort, { once: true });
-		}
+		for await (const event of stream) {
+			if (options?.signal?.aborted) {
+				return fullText;
+			}
 
-		// The SDK emits incremental text deltas; iterate and yield tokens until completion
-		for await (const event of stream as any) {
-			if (
-				event?.type === "response.output_text.delta" &&
-				typeof event.delta === "string"
-			) {
+			if (event.type === "response.output_text.delta") {
 				fullText += event.delta;
 				yield event.delta;
 			}
-			if (event?.type === "response.completed") {
-				break;
+
+			if (event.type === "error") {
+				throw new Error(event.message);
+			}
+
+			if (event.type === "response.failed") {
+				throw new Error(
+					event.response.error?.message || "OpenAI response failed."
+				);
+			}
+
+			if (event.type === "response.incomplete") {
+				const reason = event.response.incomplete_details?.reason;
+				throw new Error(
+					reason
+						? `OpenAI response incomplete: ${reason}.`
+						: "OpenAI response incomplete."
+				);
 			}
 		}
-	} catch (err: any) {
-		// If stream was aborted by SDK/user, return whatever we have without duplicating the request
-		if (
-			err?.name === "APIUserAbortError" ||
-			/aborted/i.test(String(err?.message || ""))
-		) {
-			console.warn(
-				"Streaming aborted by SDK/user; returning partial text.",
-				err
-			);
+	} catch (error) {
+		if (isAbortError(error)) {
 			return fullText;
 		}
-		// Fallback: non-streaming call to ensure at least some response
-		console.warn(
-			"Streaming failed; falling back to non-streaming response.",
-			err
-		);
-		const resp = await client.responses.create(request);
-		const text = (resp as any)?.output_text ?? "";
-		fullText = text;
-		if (text) yield text;
+
+		throw error;
 	}
 
 	return fullText;

@@ -1,0 +1,41 @@
+.ai-summarize-progress {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
+	max-width: 36rem;
+}
+
+.ai-summarize-progress__spinner {
+	width: var(--size-4-3);
+	height: var(--size-4-3);
+	flex: 0 0 auto;
+	border: 2px solid var(--background-modifier-border);
+	border-top-color: var(--interactive-accent);
+	border-radius: 50%;
+	animation: ai-summarize-spin 800ms linear infinite;
+}
+
+.ai-summarize-progress__message {
+	min-width: 0;
+	line-height: var(--line-height-tight);
+}
+
+.ai-summarize-progress__cancel {
+	min-height: var(--size-4-7);
+	padding: 0 var(--size-4-2);
+	border-radius: var(--radius-s);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ai-summarize-progress__spinner {
+		animation: none;
+	}
+}
+
+@keyframes ai-summarize-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
